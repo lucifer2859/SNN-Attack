@@ -96,7 +96,7 @@ def main():
         attack_type = 'T'
 
         clip_flag = True
-        clip_eps = 0.3
+        clip_eps = 0.4
 
         test_data_loader = torch.utils.data.DataLoader(
             dataset=torchvision.datasets.MNIST(

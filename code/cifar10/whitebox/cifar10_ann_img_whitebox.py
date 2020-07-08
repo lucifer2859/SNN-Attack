@@ -12,18 +12,23 @@ from torch.autograd import Variable
 import numpy as np
 import matplotlib.pyplot as plt
 
-def clip_by_tensor(t, t_min, t_max):
+def clip_by_tensor(t, t_min, t_max, p_min, p_max):
     """
     clip_by_tensor
     :param t: tensor
     :param t_min: min
     :param t_max: max
+    :param p_min: pixel min
+    :param p_max: pixel max
     :return: cliped tensor
     """
-    t = torch.clamp(t, 0.0, 1.0)
-    result = (t >= t_min).float() * t + (t < t_min).float() * t_min
+    result = (t >= p_min).float() * t + (t < p_min).float() * p_min
+    result = (result <= p_max).float() * result + (result > p_max).float() * p_max
+
+    result = (result >= t_min).float() * result + (result < t_min).float() * t_min
     result = (result <= t_max).float() * result + (result > t_max).float() * t_max
-    return result
+
+    return result.float()
 
 class Net(nn.Module):
     def __init__(self):
@@ -79,13 +84,13 @@ def main():
     # dataset_dir = input('输入保存MNIST数据集的位置，例如“./”  ')
     # class_num = int(input('输入class_num，例如“10”  '))
     # lr = float(input('输入学习率，例如“1e-3”  '))
-    # phase = input('输入算法阶段，例如“train/FGSM/BIM”  ')
+    # phase = input('输入算法阶段，例如“train/BIM”  ')
 
     device = 'cuda:2'
     dataset_dir = '../../dataset/'
     class_num = 10
     lr = 1e-4
-    phase = 'train'
+    phase = 'BIM'
 
     torch.cuda.empty_cache()
 
@@ -194,16 +199,14 @@ def main():
         # iter_num = int(input('输入对抗攻击的迭代次数，例如“25”  '))
         # eta = float(input('输入对抗攻击学习率，例如“0.05”  '))
         # attack_type = input('输入攻击类型，例如“UT/T”  ')
-        # clip_flag = bool(input('输入是否使用截断，例如“True/False”  '))
         # clip_eps = float(input('输入截断eps，例如“0.01”  '))
 
-        model_path = './models/cifar10_ann_v1.pth'
-        iter_num = 200
-        eta = 0.05
+        model_path = './models/cifar10_ann_v2.pth'
+        iter_num = 25
+        eta = 0.003
         attack_type = 'UT'
 
-        clip_flag = False
-        clip_eps = 0.4
+        clip_eps = 0.06
 
         transform_test = transforms.Compose([
             transforms.ToTensor(),
@@ -219,6 +222,9 @@ def main():
             batch_size=1,
             shuffle=False,
             drop_last=False)
+
+        p_max = transform_test(np.ones((32, 32, 3))).to(device)
+        p_min = transform_test(np.zeros((32, 32, 3))).to(device)
 
         net = Net().to(device)
         net.load_state_dict(torch.load(model_path))
@@ -249,12 +255,7 @@ def main():
 
                     img_grad = torch.sign(img.grad.data)
 
-                    img_adv = None
-
-                    if clip_flag:
-                        img_adv = clip_by_tensor(img + eta * img_grad, img_ori - clip_eps, img_ori + clip_eps)
-                    else:
-                        img_adv = torch.clamp(img + eta * img_grad, 0.0, 1.0)
+                    img_adv = clip_by_tensor(img + eta * img_grad, img_ori - clip_eps, img_ori + clip_eps, p_min, p_max)
 
                     img = Variable(img_adv, requires_grad=True)
                 
@@ -263,10 +264,10 @@ def main():
                 with torch.no_grad():
                     img_diff = img - img_ori
 
-                    l2_norm = torch.norm(img_diff.view(img_diff.size()[0], -1), dim=1).item()
-                    print('Perturbation: %f' % l2_norm)
+                    l_norm = torch.max(torch.abs(img_diff)).item()
+                    print('Perturbation: %f' % l_norm)
 
-                    mean_p += l2_norm
+                    mean_p += l_norm
 
                     output = net(img).unsqueeze(0)
 
@@ -304,12 +305,7 @@ def main():
 
                         img_grad = torch.sign(img.grad.data)
 
-                        img_adv = None
-
-                        if clip_flag:
-                            img_adv = clip_by_tensor(img - eta * img_grad, img_ori - clip_eps, img_ori + clip_eps)
-                        else:
-                            img_adv = torch.clamp(img - eta * img_grad, 0.0, 1.0)
+                        img_adv = clip_by_tensor(img - eta * img_grad, img_ori - clip_eps, img_ori + clip_eps, p_min, p_max)
 
                         img = Variable(img_adv, requires_grad=True)
                     
@@ -318,10 +314,10 @@ def main():
                     with torch.no_grad():
                         img_diff = img - img_ori
 
-                        l2_norm = torch.norm(img_diff.view(img_diff.size()[0], -1), dim=1).item()
-                        print('Perturbation: %f' % l2_norm)
+                        l_norm = torch.max(torch.abs(img_diff)).item()
+                        print('Perturbation: %f' % l_norm)
 
-                        mean_p += l2_norm
+                        mean_p += l_norm
 
                         output = net(img).unsqueeze(0)
 
@@ -347,7 +343,7 @@ def main():
                     mean_p /= 270
                     break
         
-        print('Mean Perturbation: %.2f' % mean_p)
+        print('Mean Perturbation: %.3f' % mean_p)
         print('success_sum: %d' % success_sum)
         print('test_sum: %d' % test_sum)
         print('success_rate: %.2f%%' % (100 * success_sum / test_sum))

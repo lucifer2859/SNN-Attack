@@ -124,12 +124,12 @@ def main():
         target_model_path1 = './models/mnist_ann_v1.pth'
         target_model_path2 = './models/mnist_img_v1.pth'
         
-        iter_num = 25
-        eta = 0.03
-        attack_type = 'UT'
+        iter_num = 100
+        eta = 0.02
+        attack_type = 'T'
 
         clip_flag = True
-        clip_eps = 0.35
+        clip_eps = 0.4
 
         test_data_loader = torch.utils.data.DataLoader(
             dataset=torchvision.datasets.MNIST(

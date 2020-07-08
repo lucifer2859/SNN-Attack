@@ -111,8 +111,8 @@ def main():
         target_model_path2 = './models/mnist_img_v1.pth'
         
         gamma = 0.05
-        iter_num = 25
-        perturbation = 3.2
+        iter_num = 50
+        perturbation = 3.1
         attack_type = 'T'
 
         test_data_loader = torch.utils.data.DataLoader(
@@ -304,8 +304,8 @@ def main():
 
                         out_spikes_counter_frequency = out_spikes_counter / T
 
-                        # loss = F.mse_loss(out_spikes_counter_frequency, F.one_hot(target_label, class_num).float())
-                        loss = F.cross_entropy(out_spikes_counter_frequency, target_label)
+                        loss = F.mse_loss(out_spikes_counter_frequency, F.one_hot(target_label, class_num).float())
+                        # loss = F.cross_entropy(out_spikes_counter_frequency, target_label)
                         
                         loss.backward()
 

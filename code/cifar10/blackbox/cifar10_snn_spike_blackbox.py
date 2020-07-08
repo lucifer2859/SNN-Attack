@@ -16,69 +16,25 @@ from torch.autograd import Variable
 import numpy as np
 import matplotlib.pyplot as plt
 
-def clip_by_tensor(t, t_min, t_max):
+def clip_by_tensor(t, t_min, t_max, p_min, p_max):
     """
     clip_by_tensor
     :param t: tensor
     :param t_min: min
     :param t_max: max
+    :param p_min: pixel min
+    :param p_max: pixel max
     :return: cliped tensor
     """
-    t = torch.clamp(t, 0.0, 1.0)
-    result = (t >= t_min).float() * t + (t < t_min).float() * t_min
+    result = (t >= p_min).float() * t + (t < p_min).float() * p_min
+    result = (result <= p_max).float() * result + (result > p_max).float() * p_max
+
+    result = (result >= t_min).float() * result + (result < t_min).float() * t_min
     result = (result <= t_max).float() * result + (result > t_max).float() * t_max
-    return result
+    
+    return result.float()
 
-class ANN_Net(nn.Module):
-    def __init__(self):
-        super().__init__()
-
-        self.train_times = 0
-        self.max_test_acccuracy = 0
-
-        self.conv = nn.Sequential(
-            nn.Conv2d(3, 256, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(256),
-            nn.ReLU(),
-
-            nn.Conv2d(256, 256, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(256),
-            nn.ReLU(),
-
-            nn.Conv2d(256, 256, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(256),
-            nn.ReLU(),
-
-            nn.MaxPool2d(2, 2),  # 16 * 16
-
-            nn.Conv2d(256, 256, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(256),
-            nn.ReLU(),
-
-            nn.Conv2d(256, 256, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(256),
-            nn.ReLU(),
-
-            nn.Conv2d(256, 256, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(256),
-            nn.ReLU(),
-            nn.MaxPool2d(2, 2)  # 8 * 8
-
-        )
-        self.fc = nn.Sequential(
-            nn.Flatten(),
-            nn.Dropout(0.5),
-            nn.Linear(256 * 8 * 8, 128 * 4 * 4, bias=False),
-            nn.ReLU(),
-            nn.Linear(128 * 4 * 4, 100, bias=False),
-            nn.ReLU()
-        )
-        self.boost = nn.AvgPool1d(10, 10)
-
-    def forward(self, x):
-        return self.boost(self.fc(self.conv(x)).unsqueeze(1)).squeeze()
-
-class SNN_Net(nn.Module):
+class Net(nn.Module):
     def __init__(self, v_threshold=1.0, v_reset=0.0):
         super().__init__()
 
@@ -154,18 +110,15 @@ def main():
         # iter_num = int(input('输入对抗攻击的迭代次数，例如“25”  '))
         # eta = float(input('输入对抗攻击学习率，例如“0.05”  '))
         # attack_type = input('输入攻击类型，例如“UT/T”  ')
-        # clip_flag = bool(input('输入是否使用截断，例如“True/False”  '))
         # clip_eps = float(input('输入截断eps，例如“0.01”  '))
 
         source_model_path = './models/cifar10_spike_v1.pth'
-        target_model_path1 = './models/cifar10_ann_v1.pth'
-        target_model_path2 = './models/cifar10_img_v1.pth'
+        target_model_path = './models/cifar10_spike_v2.pth'
         
         iter_num = 25
         eta = 0.03
         attack_type = 'UT'
 
-        clip_flag = True
         clip_eps = 0.35
 
         transform_test = transforms.Compose([
@@ -183,23 +136,21 @@ def main():
             shuffle=False,
             drop_last=False)
 
-        source_net = SNN_Net().to(device)
+        p_max = transform_test(np.ones((32, 32, 3))).to(device)
+        p_min = transform_test(np.zeros((32, 32, 3))).to(device)
+
+        source_net = Net().to(device)
         source_net.load_state_dict(torch.load(source_model_path))
 
-        target_net1 = ANN_Net().to(device)
-        target_net1.load_state_dict(torch.load(target_model_path1))
+        target_net = Net().to(device)
+        target_net.load_state_dict(torch.load(target_model_path))
 
-        target_net2 = SNN_Net().to(device)
-        target_net2.load_state_dict(torch.load(target_model_path2))
-
-        target_net1.eval()
-        target_net2.eval()
+        target_net.eval()
 
         mean_p = 0.0
         test_sum = 0
         source_success_sum = 0
-        target_success_sum1 = 0
-        target_success_sum2 = 0
+        target_success_sum = 0
 
         if attack_type == 'UT':
             for X, y in test_data_loader:
@@ -239,12 +190,7 @@ def main():
                     for spike in spike_train:
                         rate += spike.grad.data
 
-                    img_grad = torch.sign(rate)
-
-                    if clip_flag:
-                        img = clip_by_tensor(img + eta * img_grad, img_ori - clip_eps, img_ori + clip_eps)
-                    else:
-                        img = torch.clamp(img + eta * img_grad, 0.0, 1.0)
+                    img_adv = clip_by_tensor(img + eta * img_grad, img_ori - clip_eps, img_ori + clip_eps, p_min, p_max)
 
                     source_net.reset_()
 
@@ -252,60 +198,50 @@ def main():
                         p.grad.data.zero_()
                     for p in source_net.parameters():
                         p.grad.data.zero_()
-                
+
                 source_net.eval()
 
                 with torch.no_grad():
                     img_diff = img - img_ori
 
-                    l2_norm = torch.norm(img_diff.view(img_diff.size()[0], -1), dim=1).item()
-                    print('Perturbation: %f' % l2_norm)
+                    l_norm = torch.max(torch.abs(img_diff)).item()
+                    print('Perturbation: %f' % l_norm)
 
-                    mean_p += l2_norm
-
-                    target_output1 = target_net1(img).unsqueeze(0)
+                    mean_p += l_norm
 
                     for t in range(T):
                         if t == 0:
                             source_out_spikes_counter = source_net(encoder(img).float()).unsqueeze(0)
-                            target_out_spikes_counter2 = target_net2(img).unsqueeze(0)
+                            target_out_spikes_counter = target_net(encoder(img).float()).unsqueeze(0)
                         else:
                             source_out_spikes_counter += source_net(encoder(img).float()).unsqueeze(0)
-                            target_out_spikes_counter2 += target_net2(img).unsqueeze(0)
+                            target_out_spikes_counter += target_net(encoder(img).float()).unsqueeze(0)
 
-                    source_output = source_out_spikes_counter / T
-                    target_output2 = target_out_spikes_counter2 / T
+                    source_out_spikes_counter_frequency = source_out_spikes_counter / T
+                    target_out_spikes_counter_frequency = target_out_spikes_counter / T
 
-                    source_attack_flag = (source_output.max(1)[1] != label).float().sum().item()
+                    source_attack_flag = (source_out_spikes_counter.max(1)[1] != label).float().sum().item()
                     source_success_sum += source_attack_flag
 
-                    target_attack_flag1 = (target_output1.max(1)[1] != label).float().sum().item()
-                    target_success_sum1 += target_attack_flag1
-
-                    target_attack_flag2 = (target_output2.max(1)[1] != label).float().sum().item()
-                    target_success_sum2 += target_attack_flag2
+                    target_attack_flag = (target_out_spikes_counter.max(1)[1] != label).float().sum().item()
+                    target_success_sum += target_attack_flag
 
                     source_net.reset_()
-                    target_net2.reset_()
+                    target_net.reset_()
 
                     if source_attack_flag > 0.5:
                         print('Source Attack Success')
                     else:
                         print('Source Attack Failure')
 
-                    if target_attack_flag1 > 0.5:
-                        print('Target Attack 1 Success')
+                    if target_attack_flag > 0.5:
+                        print('Target Attack Success')
                     else:
-                        print('Target Attack 1 Failure')
-
-                    if target_attack_flag2 > 0.5:
-                        print('Target Attack 2 Success')
-                    else:
-                        print('Target Attack 2 Failure')
+                        print('Target Attack Failure')
 
                 if test_sum >= 250:
                     mean_p /= 250
-                    break
+                    break 
         else:
             for X, y in test_data_loader:
                 for i in range(1, class_num):
@@ -337,7 +273,7 @@ def main():
 
                         # loss = F.mse_loss(out_spikes_counter_frequency, F.one_hot(target_label, class_num).float())
                         loss = F.cross_entropy(out_spikes_counter_frequency, target_label)
-
+                        
                         loss.backward()
 
                         rate = torch.zeros_like(spike).to(device)
@@ -347,10 +283,7 @@ def main():
 
                         img_grad = torch.sign(rate)
 
-                        if clip_flag:
-                            img = clip_by_tensor(img - eta * img_grad, img_ori - clip_eps, img_ori + clip_eps)
-                        else:
-                            img = torch.clamp(img - eta * img_grad, 0.0, 1.0)
+                        img_adv = clip_by_tensor(img - eta * img_grad, img_ori - clip_eps, img_ori + clip_eps, p_min, p_max)
 
                         source_net.reset_()
 
@@ -358,69 +291,67 @@ def main():
                             p.grad.data.zero_()
                         for p in source_net.parameters():
                             p.grad.data.zero_()
-                    
+
                     source_net.eval()
 
                     with torch.no_grad():
                         img_diff = img - img_ori
 
-                        l2_norm = torch.norm(img_diff.view(img_diff.size()[0], -1), dim=1).item()
-                        print('Perturbation: %f' % l2_norm)
+                        l_norm = torch.max(torch.abs(img_diff)).item()
+                        print('Perturbation: %f' % l_norm)
 
-                        mean_p += l2_norm
-
-                        target_output1 = target_net1(img).unsqueeze(0)
+                        mean_p += l_norm
 
                         for t in range(T):
                             if t == 0:
                                 source_out_spikes_counter = source_net(encoder(img).float()).unsqueeze(0)
-                                target_out_spikes_counter2 = target_net2(img).unsqueeze(0)
+                                target_out_spikes_counter = target_net(encoder(img).float()).unsqueeze(0)
                             else:
                                 source_out_spikes_counter += source_net(encoder(img).float()).unsqueeze(0)
-                                target_out_spikes_counter2 += target_net2(img).unsqueeze(0)
+                                target_out_spikes_counter += target_net(encoder(img).float()).unsqueeze(0)
 
-                        source_output = source_out_spikes_counter / T
-                        target_output2 = target_out_spikes_counter2 / T
+                        source_out_spikes_counter_frequency = source_out_spikes_counter / T
+                        target_out_spikes_counter_frequency = target_out_spikes_counter / T
 
-                        source_attack_flag = (source_output.max(1)[1] == target_label).float().sum().item()
+                        source_attack_flag = (source_out_spikes_counter.max(1)[1] == target_label).float().sum().item()
                         source_success_sum += source_attack_flag
 
-                        target_attack_flag1 = (target_output1.max(1)[1] == target_label).float().sum().item()
-                        target_success_sum1 += target_attack_flag1
-
-                        target_attack_flag2 = (target_output2.max(1)[1] == target_label).float().sum().item()
-                        target_success_sum2 += target_attack_flag2
+                        target_attack_flag = (target_out_spikes_counter.max(1)[1] == target_label).float().sum().item()
+                        target_success_sum += target_attack_flag
 
                         source_net.reset_()
-                        target_net2.reset_()
+                        target_net.reset_()
 
                         if source_attack_flag > 0.5:
                             print('Source Attack Success')
                         else:
                             print('Source Attack Failure')
 
-                        if target_attack_flag1 > 0.5:
-                            print('Target Attack 1 Success')
+                        if target_attack_flag > 0.5:
+                            print('Target Attack Success')
                         else:
-                            print('Target Attack 1 Failure')
+                            print('Target Attack Failure')
 
-                        if target_attack_flag2 > 0.5:
-                            print('Target Attack 2 Success')
-                        else:
-                            print('Target Attack 2 Failure')
+                        '''
+                        samples = img.permute(0, 2, 3, 1).data.cpu().numpy()
+
+                        im = np.repeat(samples[0], 3, axis=2)
+                        im_path = 'demo/%d_to_%d.png' % (label.item(), target_label.item())
+                        print(im_path)
+                        print(out_spikes_counter_frequency)
+                        plt.imsave(im_path, im)
+                        '''
 
                 if test_sum >= 270:
                     mean_p /= 270
                     break
-        
-        print('Mean Perturbation: %.2f' % mean_p)
+
+        print('Mean Perturbation: %.3f' % mean_p)
         print('source_success_sum: %d' % source_success_sum)
-        print('target_success_1_sum: %d' % target_success_sum1)
-        print('target_success_2_sum: %d' % target_success_sum2)
+        print('target_success_sum: %d' % target_success_sum)
         print('test_sum: %d' % test_sum)
         print('source_success_rate: %.2f%%' % (100 * source_success_sum / test_sum))
-        print('target_success_1_rate: %.2f%%' % (100 * target_success_sum1 / test_sum))
-        print('target_success_2_rate: %.2f%%' % (100 * target_success_sum2 / test_sum))
+        print('target_success_rate: %.2f%%' % (100 * target_success_sum / test_sum))
 
 if __name__ == '__main__':
     main()

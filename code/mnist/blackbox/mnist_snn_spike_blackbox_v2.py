@@ -92,12 +92,12 @@ def main():
         source_model_path = './models/mnist_spike_v1.pth'
         target_model_path = './models/mnist_spike_v2.pth'
         
-        iter_num = 25
-        eta = 0.03
-        attack_type = 'UT'
+        iter_num = 100
+        eta = 0.02
+        attack_type = 'T'
 
         clip_flag = True
-        clip_eps = 0.35
+        clip_eps = 0.4
 
         test_data_loader = torch.utils.data.DataLoader(
             dataset=torchvision.datasets.MNIST(

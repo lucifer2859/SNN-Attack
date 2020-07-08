@@ -15,18 +15,23 @@ from torch.autograd import Variable
 import numpy as np
 import matplotlib.pyplot as plt
 
-def clip_by_tensor(t, t_min, t_max):
+def clip_by_tensor(t, t_min, t_max, p_min, p_max):
     """
     clip_by_tensor
     :param t: tensor
     :param t_min: min
     :param t_max: max
+    :param p_min: pixel min
+    :param p_max: pixel max
     :return: cliped tensor
     """
-    t = torch.clamp(t, 0.0, 1.0)
-    result = (t >= t_min).float() * t + (t < t_min).float() * t_min
+    result = (t >= p_min).float() * t + (t < p_min).float() * p_min
+    result = (result <= p_max).float() * result + (result > p_max).float() * p_max
+
+    result = (result >= t_min).float() * result + (result < t_min).float() * t_min
     result = (result <= t_max).float() * result + (result > t_max).float() * t_max
-    return result
+
+    return result.float()
 
 class Net(nn.Module):
     def __init__(self, v_threshold=1.0, v_reset=0.0):
@@ -102,16 +107,14 @@ def main():
         # iter_num = int(input('输入对抗攻击的迭代次数，例如“25”  '))
         # eta = float(input('输入对抗攻击学习率，例如“0.05”  '))
         # attack_type = input('输入攻击类型，例如“UT/T”  ')
-        # clip_flag = bool(input('输入是否使用截断，例如“True/False”  '))
         # clip_eps = float(input('输入截断eps，例如“0.01”  '))
 
         source_model_path = './models/cifar10_img_v1.pth'
         target_model_path = './models/cifar10_img_v2.pth'
         iter_num = 25
         eta = 0.02
-        attack_type = 'T'
+        attack_type = 'UT'
 
-        clip_flag = True
         clip_eps = 0.3
 
         transform_test = transforms.Compose([
@@ -128,6 +131,9 @@ def main():
             batch_size=1,
             shuffle=False,
             drop_last=False)
+
+        p_max = transform_test(np.ones((32, 32, 3))).to(device)
+        p_min = transform_test(np.zeros((32, 32, 3))).to(device)
 
         source_net = Net().to(device)
         source_net.load_state_dict(torch.load(source_model_path))
@@ -170,12 +176,7 @@ def main():
 
                     img_grad = torch.sign(img.grad.data)
 
-                    img_adv = None
-
-                    if clip_flag:
-                        img_adv = clip_by_tensor(img + eta * img_grad, img_ori - clip_eps, img_ori + clip_eps)
-                    else:
-                        img_adv = torch.clamp(img + eta * img_grad, 0.0, 1.0)
+                    img_adv = clip_by_tensor(img + eta * img_grad, img_ori - clip_eps, img_ori + clip_eps, p_min, p_max)
 
                     img = Variable(img_adv, requires_grad=True)
 
@@ -186,10 +187,10 @@ def main():
                 with torch.no_grad():
                     img_diff = img - img_ori
 
-                    l2_norm = torch.norm(img_diff.view(img_diff.size()[0], -1), dim=1).item()
-                    print('Perturbation: %f' % l2_norm)
+                    l_norm = torch.max(torch.abs(img_diff)).item()
+                    print('Perturbation: %f' % l_norm)
 
-                    mean_p += l2_norm
+                    mean_p += l_norm
 
                     for t in range(T):
                         if t == 0:
@@ -253,12 +254,7 @@ def main():
 
                         img_grad = torch.sign(img.grad.data)
 
-                        img_adv = None
-
-                        if clip_flag:
-                            img_adv = clip_by_tensor(img - eta * img_grad, img_ori - clip_eps, img_ori + clip_eps)
-                        else:
-                            img_adv = torch.clamp(img - eta * img_grad, 0.0, 1.0)
+                        img_adv = clip_by_tensor(img - eta * img_grad, img_ori - clip_eps, img_ori + clip_eps, p_min, p_max)
 
                         img = Variable(img_adv, requires_grad=True)
 
@@ -269,10 +265,10 @@ def main():
                     with torch.no_grad():
                         img_diff = img - img_ori
 
-                        l2_norm = torch.norm(img_diff.view(img_diff.size()[0], -1), dim=1).item()
-                        print('Perturbation: %f' % l2_norm)
+                        l_norm = torch.max(torch.abs(img_diff)).item()
+                        print('Perturbation: %f' % l_norm)
 
-                        mean_p += l2_norm
+                        mean_p += l_norm
 
                         for t in range(T):
                             if t == 0:
@@ -318,7 +314,7 @@ def main():
                     mean_p /= 270
                     break
         
-        print('Mean Perturbation: %.2f' % mean_p)
+        print('Mean Perturbation: %.3f' % mean_p)
         print('source_success_sum: %d' % source_success_sum)
         print('target_success_sum: %d' % target_success_sum)
         print('test_sum: %d' % test_sum)

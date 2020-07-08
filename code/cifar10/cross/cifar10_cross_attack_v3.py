@@ -16,6 +16,19 @@ from torch.autograd import Variable
 import numpy as np
 import matplotlib.pyplot as plt
 
+def clip_by_tensor(t, t_min, t_max):
+    """
+    clip_by_tensor
+    :param t: tensor
+    :param t_min: min
+    :param t_max: max
+    :return: cliped tensor
+    """
+    t = torch.clamp(t, 0.0, 1.0)
+    result = (t >= t_min).float() * t + (t < t_min).float() * t_min
+    result = (result <= t_max).float() * result + (result > t_max).float() * t_max
+    return result
+
 class ANN_Net(nn.Module):
     def __init__(self):
         super().__init__()
@@ -139,18 +152,21 @@ def main():
     if phase == 'BIM':
         # model_path = input('输入模型文件路径，例如“./model.pth”  ')
         # iter_num = int(input('输入对抗攻击的迭代次数，例如“25”  '))
-        # gamma = float(input('输入GT的采样因子，例如“0.05”  '))
-        # perturbation = float(input('输入扰动幅度，例如“4.0”  '))
+        # eta = float(input('输入对抗攻击学习率，例如“0.05”  '))
         # attack_type = input('输入攻击类型，例如“UT/T”  ')
+        # clip_flag = bool(input('输入是否使用截断，例如“True/False”  '))
+        # clip_eps = float(input('输入截断eps，例如“0.01”  '))
 
         source_model_path = './models/cifar10_spike_v1.pth'
         target_model_path1 = './models/cifar10_ann_v1.pth'
         target_model_path2 = './models/cifar10_img_v1.pth'
         
-        gamma = 0.05
         iter_num = 25
-        perturbation = 3.3
+        eta = 0.03
         attack_type = 'UT'
+
+        clip_flag = True
+        clip_eps = 0.35
 
         transform_test = transforms.Compose([
             transforms.ToTensor(),
@@ -218,51 +234,24 @@ def main():
 
                     loss.backward()
 
-                    ik = torch.zeros_like(spike).to(device)
+                    rate = torch.zeros_like(spike).to(device)
 
                     for spike in spike_train:
-                        if torch.max(torch.abs(spike.grad.data)) > 1e-32:
-                            # print('G2S Converter')
+                        rate += spike.grad.data
 
-                            grad_sign = torch.sign(spike.grad.data)
-                            grad_abs = torch.abs(spike.grad.data)
-                            grad_norm = (grad_abs - torch.min(grad_abs)) / (torch.max(grad_abs) - torch.min(grad_abs))
-                            grad_mask = torch.bernoulli(grad_norm)
-                            G2S = grad_sign * grad_mask
-                            G2S_trans = torch.clamp(G2S + spike, 0.0, 1.0) - spike
+                    img_grad = torch.sign(rate)
 
-                            ik += G2S_trans
-
-                        else:
-                            # print('Gradient Trigger')
-
-                            GT = torch.bernoulli(torch.ones_like(spike.grad.data) * gamma)
-                            GT_trans = (GT.bool() ^ spike.bool()).float() - spike
-
-                            ik += GT_trans
-
-                    ik /= T
-
-                    l2_norm = torch.norm(ik.view(ik.size()[0], -1), dim=1).item()
-                    # print('Perturbation: %f' % l2_norm)
-
-                    if l2_norm < perturbation:
-                        img = torch.clamp(img + ik, 0.0, 1.0)
-
-                        source_net.reset_()
-
-                        for p in spike_train:
-                            p.grad.data.zero_()
-                        for p in source_net.parameters():
-                            p.grad.data.zero_()
-
+                    if clip_flag:
+                        img = clip_by_tensor(img + eta * img_grad, img_ori - clip_eps, img_ori + clip_eps)
                     else:
-                        source_net.reset_()
+                        img = torch.clamp(img + eta * img_grad, 0.0, 1.0)
 
-                        for p in spike_train:
-                            p.grad.data.zero_()
-                        for p in source_net.parameters():
-                            p.grad.data.zero_()
+                    source_net.reset_()
+
+                    for p in spike_train:
+                        p.grad.data.zero_()
+                    for p in source_net.parameters():
+                        p.grad.data.zero_()
                 
                 source_net.eval()
 
@@ -346,56 +335,29 @@ def main():
 
                         out_spikes_counter_frequency = out_spikes_counter / T
 
-                        loss = F.mse_loss(out_spikes_counter_frequency, F.one_hot(target_label, class_num).float())
-                        # loss = F.cross_entropy(out_spikes_counter_frequency, target_label)
-                        
+                        # loss = F.mse_loss(out_spikes_counter_frequency, F.one_hot(target_label, class_num).float())
+                        loss = F.cross_entropy(out_spikes_counter_frequency, target_label)
+
                         loss.backward()
 
-                        ik = torch.zeros_like(spike).to(device)
+                        rate = torch.zeros_like(spike).to(device)
 
                         for spike in spike_train:
-                            if torch.max(torch.abs(spike.grad.data)) > 1e-32:
-                                # print('G2S Converter')
+                            rate += spike.grad.data
 
-                                grad_sign = -torch.sign(spike.grad.data)
-                                grad_abs = torch.abs(spike.grad.data)
-                                grad_norm = (grad_abs - torch.min(grad_abs)) / (torch.max(grad_abs) - torch.min(grad_abs))
-                                grad_mask = torch.bernoulli(grad_norm)
-                                G2S = grad_sign * grad_mask
-                                G2S_trans = torch.clamp(G2S + spike, 0.0, 1.0) - spike
+                        img_grad = torch.sign(rate)
 
-                                ik += G2S_trans
-
-                            else:
-                                # print('Gradient Trigger')
-
-                                GT = torch.bernoulli(torch.ones_like(spike.grad.data) * gamma)
-                                GT_trans = (GT.bool() ^ spike.bool()).float() - spike
-
-                                ik += GT_trans
-
-                        ik /= T
-
-                        l2_norm = torch.norm(ik.view(ik.size()[0], -1), dim=1).item()
-                        # print('Perturbation: %f' % l2_norm)
-
-                        if l2_norm < perturbation:
-                            img = torch.clamp(img + ik, 0.0, 1.0)
-
-                            source_net.reset_()
-
-                            for p in spike_train:
-                                p.grad.data.zero_()
-                            for p in source_net.parameters():
-                                p.grad.data.zero_()
-
+                        if clip_flag:
+                            img = clip_by_tensor(img - eta * img_grad, img_ori - clip_eps, img_ori + clip_eps)
                         else:
-                            source_net.reset_()
+                            img = torch.clamp(img - eta * img_grad, 0.0, 1.0)
 
-                            for p in spike_train:
-                                p.grad.data.zero_()
-                            for p in source_net.parameters():
-                                p.grad.data.zero_()
+                        source_net.reset_()
+
+                        for p in spike_train:
+                            p.grad.data.zero_()
+                        for p in source_net.parameters():
+                            p.grad.data.zero_()
                     
                     source_net.eval()
 
